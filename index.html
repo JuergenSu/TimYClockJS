@@ -1,0 +1,434 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#08090b">
+  <title>TimYClock JS</title>
+
+  <!-- =============================================================
+       TIMYCLOCK KONFIGURATION – NUR DIESEN BLOCK ANPASSEN
+
+       mode: 1 = nur Uhrzeit
+             2 = nur Laufschrift
+             3 = Uhrzeit + Laufschrift alle zwei Minuten
+             4 = Uhrzeit + Geburtstage alle zwei Minuten
+
+       Geburtstage: nur Tag und Monat eintragen, kein Geburtsjahr.
+       Eine Internetverbindung ist nicht erforderlich.
+       ============================================================= -->
+  <script>
+    const CONFIG = {
+      mode: 4,
+      text: "Bitte den Text am Anfang der HTML-Datei anpassen",
+      birthdays: [
+        { name: "Papa",      day: 28, month: 12 },
+        { name: "Mama",      day: 18, month: 5 },
+        { name: "Ole-Anton", day: 6,  month: 11 },
+        { name: "Justus",    day: 2,  month: 6 },
+        { name: "Lilien",    day: 15, month: 5 },
+        { name: "Mila",      day: 4,  month: 1 }
+      ],
+      timeZone: "Europe/Berlin",
+      scrollEveryMinutes: 2,
+      scrollStepMs: 75,
+      brightness: 0.90,        // 0.1 bis 1.0
+      ledColor: "#ff355b",   // z. B. "#ff355b", "#ffb000", "#32ff6a"
+      leapDayBirthday: "feb28" // "feb28" oder "mar1" für den 29. Februar
+    };
+  </script>
+
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+    * { box-sizing: border-box; }
+    html, body { width: 100%; min-height: 100%; margin: 0; }
+    body {
+      background: #08090b;
+      color: #a0a6ae;
+      min-height: 100svh;
+      overflow-x: hidden;
+    }
+    main {
+      min-height: 100svh;
+      display: grid;
+      place-items: center;
+      padding: clamp(12px, 3vw, 42px);
+    }
+    .clock {
+      position: relative;
+      width: min(100%, 1260px);
+      padding: clamp(6px, 1.1vw, 15px);
+      background: linear-gradient(160deg, #101215 0%, #030405 51%, #08090b 100%);
+      border: 1px solid #1c2024;
+      border-radius: clamp(4px, .8vw, 12px);
+      box-shadow:
+        0 22px 75px #000b,
+        0 0 0 1px #000,
+        inset 0 1px 1px #ffffff0a;
+      cursor: default;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    canvas {
+      display: block;
+      width: 100%;
+      aspect-ratio: 8 / 1;
+      border-radius: 2px;
+      background: #030608;
+    }
+    .help {
+      position: fixed;
+      inset-inline: 12px;
+      bottom: max(12px, env(safe-area-inset-bottom));
+      display: flex;
+      justify-content: center;
+      pointer-events: none;
+    }
+    .fullscreen {
+      pointer-events: auto;
+      appearance: none;
+      border: 1px solid #ffffff1a;
+      border-radius: 999px;
+      background: #171a1d;
+      color: #a5abb1;
+      padding: 9px 14px;
+      font: inherit;
+      font-size: 12px;
+      letter-spacing: .03em;
+      opacity: .40;
+      transition: opacity .18s, background .18s;
+      cursor: pointer;
+    }
+    .fullscreen:hover, .fullscreen:focus-visible {
+      opacity: 1;
+      background: #22262b;
+      outline-color: #f35;
+    }
+    :fullscreen main { min-height: 100vh; }
+    :fullscreen .fullscreen { opacity: .2; }
+    :fullscreen .fullscreen:hover, :fullscreen .fullscreen:focus-visible { opacity: 1; }
+    @media (prefers-reduced-motion: reduce) { .fullscreen { transition: none; } }
+  </style>
+</head>
+<body>
+  <main aria-label="TimYClock LED-Matrix-Uhr">
+    <div class="clock" title="Doppelklick für Vollbild">
+      <canvas id="matrix" role="img" aria-label="LED-Matrix mit aktueller Uhrzeit und Laufschrift"></canvas>
+    </div>
+  </main>
+  <div class="help">
+    <button class="fullscreen" id="fullscreen" type="button" aria-label="Vollbild ein- oder ausschalten">⛶ Vollbild</button>
+  </div>
+  <span id="screenreader" aria-live="off" style="position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)"></span>
+
+  <script>
+    "use strict";
+
+    // 5x7-Pixel-Font. Jede Zeichenzeile besteht aus fünf 0/1-Pixeln.
+    // Entspricht dem kompakten Punktraster der ursprünglichen MAX7219-Uhr.
+    const FONT = {
+      " ": ["00000","00000","00000","00000","00000","00000","00000"],
+      "0": ["01110","10001","10011","10101","11001","10001","01110"],
+      "1": ["00100","01100","00100","00100","00100","00100","01110"],
+      "2": ["01110","10001","00001","00010","00100","01000","11111"],
+      "3": ["11110","00001","00001","01110","00001","00001","11110"],
+      "4": ["00010","00110","01010","10010","11111","00010","00010"],
+      "5": ["11111","10000","10000","11110","00001","00001","11110"],
+      "6": ["01110","10000","10000","11110","10001","10001","01110"],
+      "7": ["11111","00001","00010","00100","01000","01000","01000"],
+      "8": ["01110","10001","10001","01110","10001","10001","01110"],
+      "9": ["01110","10001","10001","01111","00001","00001","01110"],
+      "A": ["01110","10001","10001","11111","10001","10001","10001"],
+      "B": ["11110","10001","10001","11110","10001","10001","11110"],
+      "C": ["01111","10000","10000","10000","10000","10000","01111"],
+      "D": ["11110","10001","10001","10001","10001","10001","11110"],
+      "E": ["11111","10000","10000","11110","10000","10000","11111"],
+      "F": ["11111","10000","10000","11110","10000","10000","10000"],
+      "G": ["01111","10000","10000","10111","10001","10001","01111"],
+      "H": ["10001","10001","10001","11111","10001","10001","10001"],
+      "I": ["01110","00100","00100","00100","00100","00100","01110"],
+      "J": ["00111","00010","00010","00010","10010","10010","01100"],
+      "K": ["10001","10010","10100","11000","10100","10010","10001"],
+      "L": ["10000","10000","10000","10000","10000","10000","11111"],
+      "M": ["10001","11011","10101","10101","10001","10001","10001"],
+      "N": ["10001","11001","10101","10011","10001","10001","10001"],
+      "O": ["01110","10001","10001","10001","10001","10001","01110"],
+      "P": ["11110","10001","10001","11110","10000","10000","10000"],
+      "Q": ["01110","10001","10001","10001","10101","10010","01101"],
+      "R": ["11110","10001","10001","11110","10100","10010","10001"],
+      "S": ["01111","10000","10000","01110","00001","00001","11110"],
+      "T": ["11111","00100","00100","00100","00100","00100","00100"],
+      "U": ["10001","10001","10001","10001","10001","10001","01110"],
+      "V": ["10001","10001","10001","10001","10001","01010","00100"],
+      "W": ["10001","10001","10001","10101","10101","10101","01010"],
+      "X": ["10001","10001","01010","00100","01010","10001","10001"],
+      "Y": ["10001","10001","01010","00100","00100","00100","00100"],
+      "Z": ["11111","00001","00010","00100","01000","10000","11111"],
+      ":": ["00000","00100","00100","00000","00100","00100","00000"],
+      ".": ["00000","00000","00000","00000","00000","01100","01100"],
+      ",": ["00000","00000","00000","00000","00110","00100","01000"],
+      "!": ["00100","00100","00100","00100","00100","00000","00100"],
+      "?": ["01110","10001","00001","00010","00100","00000","00100"],
+      "-": ["00000","00000","00000","11111","00000","00000","00000"],
+      "/": ["00001","00001","00010","00100","01000","10000","10000"],
+      "+": ["00000","00100","00100","11111","00100","00100","00000"],
+      "'": ["00100","00100","00010","00000","00000","00000","00000"],
+      "(": ["00010","00100","01000","01000","01000","00100","00010"],
+      ")": ["01000","00100","00010","00010","00010","00100","01000"],
+      "&": ["01100","10010","10100","01000","10101","10010","01101"],
+      "=": ["00000","11111","00000","11111","00000","00000","00000"],
+      "_": ["00000","00000","00000","00000","00000","00000","11111"]
+    };
+
+    const COLS = 64;
+    const ROWS = 8;
+    const canvas = document.getElementById("matrix");
+    const ctx = canvas.getContext("2d", { alpha: false });
+    const sr = document.getElementById("screenreader");
+    const zoneFormatter = new Intl.DateTimeFormat("en-GB", {
+      timeZone: CONFIG.timeZone,
+      year: "numeric", month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit", second: "2-digit",
+      hourCycle: "h23"
+    });
+    let lastMinuteKey = "";
+    let lastScrollMinute = "";
+    let activeScroll = null;
+    let frame = [];
+    let lastFrame = "";
+    let lastCanvasWidth = 0;
+    let lastCanvasHeight = 0;
+
+    function normalizedCharacters(value) {
+      return String(value)
+        .replace(/Ä/g, "AE").replace(/Ö/g, "OE").replace(/Ü/g, "UE")
+        .replace(/ä/g, "AE").replace(/ö/g, "OE").replace(/ü/g, "UE")
+        .replace(/ß/g, "SS").toUpperCase();
+    }
+
+    function bitmap(text) {
+      const columns = [];
+      for (const character of normalizedCharacters(text)) {
+        const rows = FONT[character] || FONT["?"];
+        const charWidth = rows[0].length;
+        for (let x = 0; x < charWidth; x++) {
+          let bits = 0;
+          for (let y = 0; y < 7; y++) {
+            if (rows[y][x] === "1") bits |= (1 << y);
+          }
+          columns.push(bits);
+        }
+        columns.push(0); // Ein Pixel Abstand zwischen Zeichen
+      }
+      return columns;
+    }
+
+    function partsInZone(date) {
+      const result = {};
+      for (const part of zoneFormatter.formatToParts(date)) {
+        if (part.type !== "literal") result[part.type] = Number(part.value);
+      }
+      return result;
+    }
+
+    function isLeapYear(year) {
+      return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+    }
+
+    function daysUntilBirthday(person, today) {
+      const month = Number(person.month);
+      const day = Number(person.day);
+      if (!Number.isInteger(month) || month < 1 || month > 12 || !Number.isInteger(day) || day < 1 || day > 31) {
+        return null;
+      }
+      const todayUtc = Date.UTC(today.year, today.month - 1, today.day);
+      for (let year = today.year; year <= today.year + 1; year++) {
+        let targetDay = day;
+        let targetMonth = month;
+        if (month === 2 && day === 29 && !isLeapYear(year)) {
+          if (CONFIG.leapDayBirthday === "mar1") {
+            targetMonth = 3;
+            targetDay = 1;
+          } else {
+            targetDay = 28;
+          }
+        }
+        const target = Date.UTC(year, targetMonth - 1, targetDay);
+        const check = new Date(target);
+        if (check.getUTCDate() !== targetDay || check.getUTCMonth() !== targetMonth - 1) return null;
+        if (target >= todayUtc) return Math.round((target - todayUtc) / 86400000);
+      }
+      return null;
+    }
+
+    function birthdayMessage(now) {
+      const entries = CONFIG.birthdays.map(person => {
+        const days = daysUntilBirthday(person, now);
+        return days === null ? null : `${person.name}: ${days}`;
+      }).filter(Boolean);
+      return entries.length ? `Tage bis zum Geburtstag --- ${entries.join("  ")}` : "Keine Geburtstage konfiguriert";
+    }
+
+    function pad(value) { return String(value).padStart(2, "0"); }
+
+    function currentTime(now) {
+      return `${pad(now.hour)}:${pad(now.minute)}:${pad(now.second)}`;
+    }
+
+    function startScroll(message, nowMs) {
+      activeScroll = { columns: bitmap(message), message, started: nowMs };
+      sr.textContent = message;
+    }
+
+    function centeredTimeColumns(now) {
+      const output = new Array(COLS).fill(0);
+      const letters = bitmap(currentTime(now));
+      const offset = Math.floor((COLS - letters.length) / 2);
+      for (let x = 0; x < letters.length; x++) {
+        const index = x + offset;
+        if (index >= 0 && index < COLS) output[index] = letters[x];
+      }
+      return output;
+    }
+
+    function scrollingColumns(nowMs) {
+      const pixels = new Array(COLS).fill(0);
+      const step = Math.max(20, Number(CONFIG.scrollStepMs) || 75);
+      const offset = Math.floor((nowMs - activeScroll.started) / step);
+      for (let x = 0; x < COLS; x++) {
+        const source = x + offset - COLS;
+        if (source >= 0 && source < activeScroll.columns.length) pixels[x] = activeScroll.columns[source];
+      }
+      if (offset > activeScroll.columns.length + COLS) activeScroll = null;
+      return pixels;
+    }
+
+    function hexToRgb(hex) {
+      let value = String(hex).trim().replace(/^#/, "");
+      if (/^[0-9a-f]{3}$/i.test(value)) value = [...value].map(c => c + c).join("");
+      if (!/^[0-9a-f]{6}$/i.test(value)) value = "ff355b";
+      return [parseInt(value.slice(0,2),16), parseInt(value.slice(2,4),16), parseInt(value.slice(4,6),16)];
+    }
+
+    const [red, green, blue] = hexToRgb(CONFIG.ledColor);
+    const brightness = Math.max(.1, Math.min(1, Number(CONFIG.brightness) || .9));
+    const litColor = `rgba(${red},${green},${blue},${brightness})`;
+    const glowColor = `rgba(${red},${green},${blue},${.35 * brightness})`;
+
+    function resizeCanvas() {
+      const rect = canvas.getBoundingClientRect();
+      if (!rect.width || !rect.height) return;
+      const scale = Math.min(window.devicePixelRatio || 1, 3);
+      const width = Math.round(rect.width * scale);
+      const height = Math.round(rect.height * scale);
+      if (width !== canvas.width || height !== canvas.height) {
+        canvas.width = width;
+        canvas.height = height;
+        lastFrame = "";
+      }
+    }
+
+    function draw(columns) {
+      const serialized = columns.join(",");
+      if (serialized === lastFrame && canvas.width === lastCanvasWidth && canvas.height === lastCanvasHeight) return;
+      lastFrame = serialized;
+      lastCanvasWidth = canvas.width;
+      lastCanvasHeight = canvas.height;
+      const width = canvas.width;
+      const height = canvas.height;
+      const cellX = width / COLS;
+      const cellY = height / ROWS;
+      const size = Math.min(cellX, cellY);
+      const radius = size * .31;
+
+      ctx.fillStyle = "#04080b";
+      ctx.fillRect(0, 0, width, height);
+
+      // Die feinen Trennlinien entsprechen den acht physisch verketteten Modulen.
+      for (let module = 1; module < COLS / 8; module++) {
+        const seam = Math.round(module * 8 * cellX);
+        ctx.fillStyle = "#010203";
+        ctx.fillRect(seam - 1, 0, Math.max(1, width / 1300), height);
+        ctx.fillStyle = "#ffffff08";
+        ctx.fillRect(seam + 1, 0, Math.max(1, width / 1400), height);
+      }
+
+      for (let x = 0; x < COLS; x++) {
+        for (let y = 0; y < ROWS; y++) {
+          const cx = (x + .5) * cellX;
+          const cy = (y + .5) * cellY;
+          const isLit = (columns[x] & (1 << y)) !== 0;
+
+          if (isLit) {
+            const halo = ctx.createRadialGradient(cx, cy, 0, cx, cy, radius * 2.1);
+            halo.addColorStop(0, glowColor);
+            halo.addColorStop(1, `rgba(${red},${green},${blue},0)`);
+            ctx.fillStyle = halo;
+            ctx.beginPath();
+            ctx.arc(cx, cy, radius * 2.1, 0, Math.PI * 2);
+            ctx.fill();
+          }
+
+          ctx.beginPath();
+          ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+          ctx.fillStyle = isLit ? litColor : "#14212b";
+          ctx.fill();
+
+          ctx.beginPath();
+          ctx.arc(cx - radius * .22, cy - radius * .22, radius * .56, 0, Math.PI * 2);
+          ctx.fillStyle = isLit ? "#ffffff50" : "#33465432";
+          ctx.fill();
+        }
+      }
+    }
+
+    function tick() {
+      const nowMs = Date.now();
+      const now = partsInZone(new Date(nowMs));
+      const minuteKey = `${now.year}-${now.month}-${now.day}-${now.hour}-${now.minute}`;
+      const mode = Number(CONFIG.mode);
+
+      if (mode === 2 && !activeScroll) {
+        startScroll(CONFIG.text, nowMs);
+      } else if ((mode === 3 || mode === 4) && lastMinuteKey && minuteKey !== lastMinuteKey) {
+        const interval = Math.max(1, Math.floor(Number(CONFIG.scrollEveryMinutes) || 2));
+        if (now.minute % interval === 0 && minuteKey !== lastScrollMinute) {
+          startScroll(mode === 3 ? CONFIG.text : birthdayMessage(now), nowMs);
+          lastScrollMinute = minuteKey;
+        }
+      }
+      lastMinuteKey = minuteKey;
+
+      if (mode === 1 || (mode !== 2 && mode !== 3 && mode !== 4)) {
+        activeScroll = null;
+      }
+
+      frame = activeScroll ? scrollingColumns(nowMs) : centeredTimeColumns(now);
+      draw(frame);
+    }
+
+    async function toggleFullscreen() {
+      try {
+        if (document.fullscreenElement) await document.exitFullscreen();
+        else await document.documentElement.requestFullscreen();
+      } catch (error) {
+        console.warn("Vollbildmodus nicht verfügbar:", error);
+      }
+    }
+
+    document.getElementById("fullscreen").addEventListener("click", toggleFullscreen);
+    document.querySelector(".clock").addEventListener("dblclick", toggleFullscreen);
+    window.addEventListener("keydown", event => {
+      if (event.key.toLowerCase() === "f" && !event.repeat && !event.altKey && !event.ctrlKey && !event.metaKey) {
+        toggleFullscreen();
+      }
+    });
+    window.addEventListener("resize", resizeCanvas);
+    if (typeof ResizeObserver !== "undefined") new ResizeObserver(resizeCanvas).observe(canvas);
+
+    resizeCanvas();
+    tick();
+    setInterval(tick, 50);
+  </script>
+</body>
+</html>
